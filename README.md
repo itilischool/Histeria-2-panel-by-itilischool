@@ -13,4 +13,4 @@
 ## 🚀 Установка одной командой
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ТВОЙ_НИК/НАЗВАНИЕ_РЕПО/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/itilischool/Histeria-2-panel-by-itilischool/main/install.sh)
