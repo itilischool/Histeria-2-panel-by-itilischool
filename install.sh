@@ -1,44 +1,36 @@
 #!/bin/bash
-# ================================================
-# Hysteria 2 + Web Panel Auto Installer
-# Репозиторий: https://github.com/itilischool/Histeria-2-panel-by-itilischool
-# ================================================
+# Hysteria 2 + Web Panel Installer
+# Optimized for: bash <(curl -fsSL ...)
 
 set -eo pipefail
 
-echo "Запуск автоустановки Hysteria 2 с веб-панелью..."
+echo "=== Hysteria 2 + Web Panel Auto Installer ==="
 
 # ====================== ВВОД ДАННЫХ ======================
-read -p "Домен для панели управления (например: panel.digitalteen.ru): " PANEL_DOMAIN
-read -p "Домен для маскировочного сайта (например: digitalteen.ru): " MASK_DOMAIN
+read -p "Домен для панели (panel.example.com): " PANEL_DOMAIN
+read -p "Домен для маскировки (example.com): " MASK_DOMAIN
 read -p "Email для Let's Encrypt: " LETS_EMAIL
-read -p "Порт для Hysteria 2 [по умолчанию 8443]: " HY_PORT
+read -p "Порт Hysteria [8443]: " HY_PORT
 HY_PORT=${HY_PORT:-8443}
-read -p "Пароль администратора панели (минимум 12 символов): " ADMIN_PASS
-read -p "Включить UFW firewall? (y/n): " ENABLE_UFW
+read -p "Пароль администратора (минимум 12 символов): " ADMIN_PASS
+read -p "Включить UFW? (y/n): " ENABLE_UFW
 read -p "Включить BBR? (y/n): " ENABLE_BBR
 
-if [[ -z "$PANEL_DOMAIN" || -z "$MASK_DOMAIN" || -z "$LETS_EMAIL" || -z "$ADMIN_PASS" ]]; then
-  echo "Ошибка: Все обязательные поля должны быть заполнены!"
-  exit 1
-fi
+[[ -z "$PANEL_DOMAIN" || -z "$MASK_DOMAIN" || -z "$LETS_EMAIL" || -z "$ADMIN_PASS" ]] && { echo "Ошибка: заполните все обязательные поля"; exit 1; }
+[[ ${#ADMIN_PASS} -lt 12 ]] && { echo "Ошибка: пароль слишком короткий"; exit 1; }
 
-if [[ ${#ADMIN_PASS} -lt 12 ]]; then
-  echo "Ошибка: Пароль должен быть не менее 12 символов!"
-  exit 1
-fi
-
-# ====================== ПОДГОТОВКА ======================
-apt-get update && apt-get upgrade -y
+# ====================== УСТАНОВКА ПАКЕТОВ ======================
+apt-get update -qq && apt-get upgrade -y -qq
 apt-get install -y curl wget nginx python3 python3-venv python3-pip certbot python3-certbot-nginx ufw sqlite3
 
-if [[ "$ENABLE_BBR" == "y" || "$ENABLE_BBR" == "Y" ]]; then
+# BBR
+if [[ "$ENABLE_BBR" =~ ^[Yy] ]]; then
   echo "Включаем BBR..."
   echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-  sysctl -p
+  sysctl -p >/dev/null
 fi
 
-# ====================== HYSTERIA 2 ======================
+# ====================== HYSTERIA ======================
 echo "Устанавливаем Hysteria 2..."
 curl -Lo /usr/local/bin/hysteria https://download.hysteria.network/app/latest/hysteria-linux-amd64
 chmod +x /usr/local/bin/hysteria
@@ -46,7 +38,7 @@ chmod +x /usr/local/bin/hysteria
 mkdir -p /etc/hysteria /opt/hysteria-panel/static /var/www/mask
 
 # ====================== ПАНЕЛЬ ======================
-echo "Скачиваем файлы панели..."
+echo "Скачиваем панель управления..."
 curl -fsSL https://raw.githubusercontent.com/itilischool/Histeria-2-panel-by-itilischool/main/panel/main.py -o /opt/hysteria-panel/main.py
 curl -fsSL https://raw.githubusercontent.com/itilischool/Histeria-2-panel-by-itilischool/main/panel/static/index.html -o /opt/hysteria-panel/static/index.html
 
@@ -54,8 +46,8 @@ sed -i "s/__ADMIN_PASS_PLACEHOLDER__/${ADMIN_PASS}/g" /opt/hysteria-panel/main.p
 
 cd /opt/hysteria-panel
 python3 -m venv venv
-venv/bin/pip install --upgrade pip
-venv/bin/pip install fastapi uvicorn pydantic PyJWT==2.8.0 bcrypt pyyaml python-multipart
+venv/bin/pip install -q --upgrade pip
+venv/bin/pip install -q fastapi uvicorn pydantic PyJWT==2.8.0 bcrypt pyyaml python-multipart
 
 # ====================== CONFIG HYSTERIA ======================
 cat > /etc/hysteria/config.yaml << EOF
@@ -78,10 +70,10 @@ masquerade:
     rewriteHost: true
 EOF
 
-# ====================== SYSTEMD ======================
-cat > /etc/systemd/system/hysteria.service << EOF
+# ====================== СЕРВИСЫ ======================
+cat > /etc/systemd/system/hysteria.service << 'EOF2'
 [Unit]
-Description=Hysteria 2 Server
+Description=Hysteria 2
 After=network.target
 
 [Service]
@@ -91,15 +83,14 @@ ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
 Restart=always
 RestartSec=3
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF2
 
-cat > /etc/systemd/system/hysteria-panel.service << EOF
+cat > /etc/systemd/system/hysteria-panel.service << 'EOF3'
 [Unit]
-Description=Hysteria 2 Control Panel
+Description=Hysteria 2 Panel
 After=network.target
 
 [Service]
@@ -108,51 +99,36 @@ User=root
 WorkingDirectory=/opt/hysteria-panel
 ExecStart=/opt/hysteria-panel/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
-RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF3
 
 systemctl daemon-reload
 systemctl enable --now hysteria
 systemctl enable --now hysteria-panel
 
 # ====================== NGINX ======================
-echo "Настраиваем Nginx..."
-
 cat > /var/www/mask/index.html << 'HTML'
 <!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Tech Insights</title><style>body{font-family:system-ui;background:#0a0a0a;color:#ddd;padding:40px}</style></head>
-<body>
-<h1>Tech Insights</h1>
-<p>Актуальные статьи о технологиях, безопасности и разработке.</p>
-</body></html>
+<body><h1>Tech Insights</h1><p>Актуальные статьи о технологиях и безопасности.</p></body></html>
 HTML
 
 cat > /etc/nginx/sites-available/panel << EOF
-server {
-    listen 80;
-    server_name ${PANEL_DOMAIN};
-    location / {
-        proxy_pass http://127.0.0.1:8000;
+server { listen 80; server_name ${PANEL_DOMAIN};
+    location / { proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
+        proxy_set_header X-Forwarded-Proto \$scheme; }
 }
 EOF
 
 cat > /etc/nginx/sites-available/mask << EOF
-server {
-    listen 80;
-    server_name ${MASK_DOMAIN};
-    root /var/www/mask;
-    index index.html;
-    location / {
-        try_files \$uri \$uri/ =404;
-    }
+server { listen 80; server_name ${MASK_DOMAIN};
+    root /var/www/mask; index index.html;
+    location / { try_files \$uri \$uri/ =404; }
 }
 EOF
 
@@ -163,13 +139,13 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl restart nginx
 
 # ====================== SSL ======================
-echo "Получаем SSL-сертификаты..."
+echo "Получаем SSL сертификаты..."
 certbot certonly --nginx --domains "${PANEL_DOMAIN},${MASK_DOMAIN}" \
-  --non-interactive --agree-tos --email "${LETS_EMAIL}" --redirect || echo "SSL не удалось получить автоматически (проверь email)"
+  --non-interactive --agree-tos --email "${LETS_EMAIL}" --redirect || true
 
 # ====================== UFW ======================
-if [[ "$ENABLE_UFW" == "y" || "$ENABLE_UFW" == "Y" ]]; then
-  echo "Настраиваем UFW..."
+if [[ "$ENABLE_UFW" =~ ^[Yy] ]]; then
+  echo "Настраиваем firewall..."
   ufw default deny incoming
   ufw default allow outgoing
   ufw allow ssh
@@ -179,39 +155,26 @@ if [[ "$ENABLE_UFW" == "y" || "$ENABLE_UFW" == "Y" ]]; then
   ufw --force enable
 fi
 
-# ====================== СОЗДАЁМ UNINSTALL.SH ======================
-cat > /opt/hysteria-panel/uninstall.sh << 'UNINSTALL'
+# ====================== UNINSTALL ======================
+cat > /opt/hysteria-panel/uninstall.sh << 'UNINST'
 #!/bin/bash
-echo "Удаление Hysteria 2 и панели..."
-
 systemctl stop hysteria hysteria-panel nginx 2>/dev/null || true
 systemctl disable hysteria hysteria-panel 2>/dev/null || true
-
-rm -f /etc/systemd/system/hysteria.service
-rm -f /etc/systemd/system/hysteria-panel.service
+rm -f /etc/systemd/system/hysteria.service /etc/systemd/system/hysteria-panel.service
 rm -rf /etc/hysteria /opt/hysteria-panel /var/www/mask /usr/local/bin/hysteria
-
 rm -f /etc/nginx/sites-enabled/panel /etc/nginx/sites-enabled/mask
-rm -f /etc/nginx/sites-available/panel /etc/nginx/sites-available/mask
-
 nginx -t && systemctl restart nginx 2>/dev/null || true
-
-echo "Удаление завершено успешно."
-UNINSTALL
-
+echo "Удаление завершено."
+UNINST
 chmod +x /opt/hysteria-panel/uninstall.sh
 
-# ====================== ФИНАЛ ======================
-echo ""
+# ====================== ИТОГ ======================
 echo "=================================================="
-echo "УСТАНОВКА УСПЕШНО ЗАВЕРШЕНА!"
+echo "УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО"
 echo "=================================================="
-echo "Панель управления: https://${PANEL_DOMAIN}"
-echo "Логин: admin"
-echo "Пароль: ${ADMIN_PASS}"
-echo "Маскировочный сайт: https://${MASK_DOMAIN}"
-echo "Hysteria слушает UDP порт: ${HY_PORT}"
+echo "Панель:     https://${PANEL_DOMAIN}   (admin / ${ADMIN_PASS})"
+echo "Маскировка: https://${MASK_DOMAIN}"
+echo "Hysteria:   UDP ${HY_PORT}"
 echo ""
-echo "Для удаления всей системы выполните:"
-echo "   /opt/hysteria-panel/uninstall.sh"
+echo "Удаление:   /opt/hysteria-panel/uninstall.sh"
 echo "=================================================="
