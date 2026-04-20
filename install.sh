@@ -1,21 +1,17 @@
 #!/bin/bash
 #===============================================================================
-# VPN/PANEL MANAGER - Production Ready Installer
-# Hysteria2 + NaiveProxy + Web Management Panel
+# VPN/PANEL MANAGER - Fixed Version
 #===============================================================================
 
-# Логирование
 exec > >(tee -a /tmp/vpn-install.log) 2>&1
 echo "=== Installation started at $(date) ==="
 
-# Цвета
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Пути
 INSTALL_DIR="/opt/vpn-panel"
 CONFIG_DIR="${INSTALL_DIR}/configs"
 DATA_DIR="${INSTALL_DIR}/data"
@@ -24,7 +20,6 @@ WWW_DIR="${INSTALL_DIR}/www/mask"
 BACKEND_DIR="${INSTALL_DIR}/backend"
 FRONTEND_DIR="${INSTALL_DIR}/frontend"
 
-# Переменные
 PANEL_DOMAIN=""
 MASK_DOMAIN=""
 SSL_EMAIL=""
@@ -42,18 +37,23 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 die() {
     log_error "$1"
-    echo "See /tmp/vpn-install.log for details"
     exit 1
 }
 
+# ИСПРАВЛЕНО: генерация пароля без спецсимволов которые ломают URI
 generate_password() {
     local length=${1:-32}
-    < /dev/urandom tr -dc 'A-Za-z0-9!@#%^&*' | head -c "$length"
+    < /dev/urandom tr -dc 'A-Za-z0-9' | head -c "$length"
+}
+
+# ИСПРАВЛЕНО: очистка ввода от лишних символов
+clean_input() {
+    echo "$1" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        die "Запустите от root (sudo)"
+        die "Запустите от root"
     fi
 }
 
@@ -69,20 +69,25 @@ check_os() {
 collect_input() {
     echo -e "\n${GREEN}=== Настройка VPN ===${NC}\n"
     
+    # ИСПРАВЛЕНО: правильная очистка ввода
     read -rp "Домен панели (panel.example.com): " PANEL_DOMAIN
-    PANEL_DOMAIN=$(echo "$PANEL_DOMAIN" | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+    PANEL_DOMAIN=$(clean_input "$PANEL_DOMAIN" | tr '[:upper:]' '[:lower:]')
     
     read -rp "Домен маскировки (example.com): " MASK_DOMAIN
-    MASK_DOMAIN=$(echo "$MASK_DOMAIN" | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+    MASK_DOMAIN=$(clean_input "$MASK_DOMAIN" | tr '[:upper:]' '[:lower:]')
     
     read -rp "Email для SSL: " SSL_EMAIL
+    SSL_EMAIL=$(clean_input "$SSL_EMAIL")
     
     read -rp "Порт панели [8080]: " input_port
-    [[ -n "$input_port" ]] && PANEL_PORT="$input_port"
+    if [[ -n "$input_port" ]]; then
+        PANEL_PORT="$input_port"
+    fi
     
     read -rp "Включить BBR? [y/N]: " bbr_input
     [[ "$bbr_input" =~ ^[Yy]$ ]] && ENABLE_BBR="yes"
     
+    # Генерация паролей
     ADMIN_PASS=$(generate_password 24)
     HYSTERIA_PASS=$(generate_password 32)
     NAIVE_PASS=$(generate_password 32)
@@ -96,7 +101,7 @@ collect_input() {
     read -rp "Продолжить? [Y/n]: " confirm
     
     if [[ "$confirm" =~ ^[Nn]$ ]]; then
-        echo "Отменено пользователем"
+        echo "Отменено"
         exit 0
     fi
     
@@ -105,14 +110,14 @@ collect_input() {
 
 prepare_system() {
     log_info "Обновление системы..."
-    apt-get update -qq || die "Failed to update"
-    apt-get upgrade -y -qq || die "Failed to upgrade"
+    apt-get update -qq
+    apt-get upgrade -y -qq
     
     log_info "Установка зависимостей..."
     apt-get install -y -qq \
         curl wget git unzip socat cron jq \
         python3 python3-pip python3-venv \
-        ca-certificates gnupg || die "Failed to install deps"
+        ca-certificates gnupg
     
     log_success "Система готова"
 }
@@ -160,12 +165,13 @@ install_hysteria() {
     chmod +x /usr/local/bin/hysteria
     
     mkdir -p "${CONFIG_DIR}"
+    # ИСПРАВЛЕНО: правильные пути к SSL
     cat > "${CONFIG_DIR}/hysteria.json" << EOF
 {
     "listen": ":443",
     "tls": {
-        "cert": "/etc/caddy/certs/${MASK_DOMAIN}/fullchain.pem",
-        "key": "/etc/caddy/certs/${MASK_DOMAIN}/key.pem"
+        "cert": "/etc/ssl/certs/${MASK_DOMAIN}.crt",
+        "key": "/etc/ssl/private/${MASK_DOMAIN}.key"
     },
     "auth": {
         "type": "password",
@@ -225,8 +231,6 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.6
 sqlalchemy==2.0.25
-aiofiles==23.2.1
-psutil==5.9.8
 EOF
 
     cat > "${BACKEND_DIR}/database.py" << 'EOF'
@@ -276,7 +280,7 @@ def init_db():
         if c.fetchone()[0] == 0:
             from passlib.context import CryptContext
             pwd = CryptContext(schemes=["bcrypt"])
-            hashed = pwd.hash("CHANGE_ME")
+            hashed = pwd.hash("admin123")
             c.execute('INSERT INTO admins (username, password_hash) VALUES (?, ?)',
                      ("admin", hashed))
             conn.commit()
@@ -353,11 +357,11 @@ EOF
 
     cat > "${BACKEND_DIR}/main.py" << 'EOF'
 #!/usr/bin/env python3
-import logging, sys, json, secrets, string, subprocess
+import logging, sys, json, secrets, string
 from pathlib import Path
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -371,22 +375,19 @@ LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("panel")
 
 init_db()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Panel starting...")
     yield
-    logger.info("Panel stopping...")
 
 app = FastAPI(title="VPN Panel", version="1.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 
 def generate_password(length=32):
-    chars = string.ascii_letters + string.digits + "!@#$%^&*"
+    chars = string.ascii_letters + string.digits
     return ''.join(secrets.choice(chars) for _ in range(length))
 
 def get_server_config():
@@ -471,6 +472,7 @@ async def generate_config(user_id: int, config_type: str,
 
 @app.get("/api/system/status")
 async def system_status(current_admin: dict = Depends(get_current_admin)):
+    import subprocess
     def get_status(name):
         try:
             result = subprocess.run(["systemctl", "is-active", name],
@@ -480,15 +482,6 @@ async def system_status(current_admin: dict = Depends(get_current_admin)):
             return "unknown"
     return {"services": {"hysteria": get_status("hysteria"), "caddy": get_status("caddy"),
             "panel": get_status("panel")}}
-
-@app.get("/api/logs")
-async def get_logs(limit: int = 50, current_admin: dict = Depends(get_current_admin)):
-    with get_db() as conn:
-        cursor = conn.execute(
-            'SELECT id, level, message, timestamp FROM logs ORDER BY timestamp DESC LIMIT ?', (limit,))
-        rows = cursor.fetchall()
-    return [{"id": r["id"], "level": r["level"], "message": r["message"], 
-             "timestamp": r["timestamp"]} for r in rows]
 
 @app.get("/")
 async def serve_frontend():
@@ -682,6 +675,7 @@ EOF
     log_success "Systemd настроен"
 }
 
+# ИСПРАВЛЕНО: правильная настройка Caddy с SSL
 configure_caddy() {
     log_info "Настройка Caddy..."
     
@@ -705,7 +699,24 @@ ${MASK_DOMAIN} {
 }
 EOF
 
+    # Копируем SSL сертификаты для Hysteria
+    mkdir -p /etc/ssl/certs /etc/ssl/private
+    
+    # Запускаем Caddy для получения SSL
     systemctl enable --now caddy
+    sleep 5
+    
+    # Ждем пока Caddy получит сертификаты
+    log_info "Ожидание выпуска SSL сертификатов..."
+    sleep 10
+    
+    # Копируем сертификаты из Caddy
+    if [[ -f /etc/caddy/certs/${MASK_DOMAIN}/fullchain.pem ]]; then
+        cp /etc/caddy/certs/${MASK_DOMAIN}/fullchain.pem /etc/ssl/certs/${MASK_DOMAIN}.crt
+        cp /etc/caddy/certs/${MASK_DOMAIN}/key.pem /etc/ssl/private/${MASK_DOMAIN}.key
+        chmod 600 /etc/ssl/private/${MASK_DOMAIN}.key
+    fi
+    
     log_success "Caddy настроен"
 }
 
@@ -743,29 +754,42 @@ PYEOF
     log_success "Конфигурация сохранена"
 }
 
+# ИСПРАВЛЕНО: правильный вывод без \n
 print_final() {
     clear
-    echo -e "\n${GREEN}╔══════════════════════════════════════════╗${NC}"
+    echo ""
+    echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║${NC}  ✅ УСТАНОВКА ЗАВЕРШЕНА${NC}"
-    echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}\n"
+    echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
+    echo ""
     
     echo -e "${BLUE}Панель:${NC}"
-    echo "  URL: https://${PANEL_DOMAIN}"
-    echo "  Логин: ${ADMIN_USER}"
-    echo "  Пароль: ${ADMIN_PASS}\n"
+    printf "  URL: https://%s\n" "${PANEL_DOMAIN}"
+    printf "  Логин: %s\n" "${ADMIN_USER}"
+    printf "  Пароль: %s\n" "${ADMIN_PASS}"
+    echo ""
     
     echo -e "${BLUE}Hysteria2:${NC}"
-    echo "  hy2://${HYSTERIA_PASS}@${MASK_DOMAIN}:443?sni=${MASK_DOMAIN}\n"
+    printf "  hy2://%s@%s:443?sni=%s\n" "${HYSTERIA_PASS}" "${MASK_DOMAIN}" "${MASK_DOMAIN}"
+    echo ""
     
     echo -e "${BLUE}NaiveProxy:${NC}"
-    echo "  https://${NAIVE_USER}:${NAIVE_PASS}@${MASK_DOMAIN}:443\n"
+    printf "  https://%s:%s@%s:443\n" "${NAIVE_USER}" "${NAIVE_PASS}" "${MASK_DOMAIN}"
+    echo ""
     
-    echo -e "${YELLOW}СОХРАНИТЕ ЭТИ ДАННЫЕ!${NC}\n"
+    echo -e "${YELLOW}СОХРАНИТЕ ЭТИ ДАННЫЕ!${NC}"
+    echo ""
     echo "Лог: /tmp/vpn-install.log"
+    echo ""
+    echo "Проверка сервисов:"
+    echo "  systemctl status caddy"
+    echo "  systemctl status panel"
+    echo "  systemctl status hysteria"
 }
 
 main() {
-    echo -e "${GREEN}🚀 VPN Panel Installer${NC}\n"
+    echo -e "${GREEN}🚀 VPN Panel Installer${NC}"
+    echo ""
     
     check_root
     check_os
@@ -783,8 +807,9 @@ main() {
     save_config
     
     log_info "Запуск сервисов..."
-    systemctl start hysteria || log_error "Failed to start hysteria"
-    systemctl start panel || log_error "Failed to start panel"
+    systemctl restart caddy
+    systemctl start panel
+    systemctl start hysteria
     
     print_final
 }
