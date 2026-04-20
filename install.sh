@@ -1,29 +1,26 @@
 #!/bin/bash
 # ================================================
-# Hysteria 2 + Web Panel Installer
-# Специальная версия с самоочисткой от CRLF
+# Hysteria 2 + Web Panel Auto Installer
+# Исправлено для запуска через bash <(curl ...)
 # ================================================
-
-# Самоочистка от Windows CRLF
-if [[ -n "$(cat "$0" | tr -d '\r' | cmp -s - <(cat "$0"))" ]]; then
-  echo "Обнаружены неправильные окончания строк. Очищаем и перезапускаем..."
-  exec bash <(curl -fsSL https://raw.githubusercontent.com/itilischool/Histeria-2-panel-by-itilischool/main/install.sh | tr -d '\r')
-fi
 
 set -eo pipefail
 
 echo "=== Hysteria 2 + Web Panel Auto Installer ==="
 
 # ====================== ВВОД ДАННЫХ ======================
-read -p "Домен для панели управления: " PANEL_DOMAIN
-read -p "Домен для маскировочного сайта: " MASK_DOMAIN
-read -p "Email для Let's Encrypt: " LETS_EMAIL
-read -p "Порт для Hysteria 2 [8443]: " HY_PORT
-HY_PORT=${HY_PORT:-8443}
-read -p "Пароль администратора (минимум 12 символов): " ADMIN_PASS
-read -p "Включить UFW? (y/n): " ENABLE_UFW
-read -p "Включить BBR? (y/n): " ENABLE_BBR
+echo "Введите данные для установки:"
 
+read -r -p "Домен для панели управления: " PANEL_DOMAIN
+read -r -p "Домен для маскировочного сайта: " MASK_DOMAIN
+read -r -p "Email для Let's Encrypt: " LETS_EMAIL
+read -r -p "Порт для Hysteria 2 [8443]: " HY_PORT
+HY_PORT=${HY_PORT:-8443}
+read -r -p "Пароль администратора (минимум 12 символов): " ADMIN_PASS
+read -r -p "Включить UFW firewall? (y/n): " ENABLE_UFW
+read -r -p "Включить BBR? (y/n): " ENABLE_BBR
+
+# Проверка
 if [[ -z "$PANEL_DOMAIN" || -z "$MASK_DOMAIN" || -z "$LETS_EMAIL" || -z "$ADMIN_PASS" ]]; then
   echo "Ошибка: Все обязательные поля должны быть заполнены!"
   exit 1
@@ -33,6 +30,8 @@ if [[ ${#ADMIN_PASS} -lt 12 ]]; then
   echo "Ошибка: Пароль должен быть не менее 12 символов!"
   exit 1
 fi
+
+echo "Начинаем установку с введёнными данными..."
 
 # ====================== ПОДГОТОВКА ======================
 apt-get update -qq && apt-get upgrade -y -qq
