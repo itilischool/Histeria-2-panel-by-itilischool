@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# VPN/PANEL MANAGER - Fixed Version
+# VPN/PANEL MANAGER - FINAL FIXED VERSION
 #===============================================================================
 
 exec > >(tee -a /tmp/vpn-install.log) 2>&1
@@ -40,21 +40,19 @@ die() {
     exit 1
 }
 
-# ИСПРАВЛЕНО: генерация пароля без спецсимволов которые ломают URI
+# ИСПРАВЛЕНО: короткие пароли (макс 40 символов для bcrypt)
 generate_password() {
     local length=${1:-32}
+    [[ $length -gt 40 ]] && length=40
     < /dev/urandom tr -dc 'A-Za-z0-9' | head -c "$length"
 }
 
-# ИСПРАВЛЕНО: очистка ввода от лишних символов
 clean_input() {
     echo "$1" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        die "Запустите от root"
-    fi
+    [[ $EUID -ne 0 ]] && die "Запустите от root"
 }
 
 check_os() {
@@ -69,7 +67,6 @@ check_os() {
 collect_input() {
     echo -e "\n${GREEN}=== Настройка VPN ===${NC}\n"
     
-    # ИСПРАВЛЕНО: правильная очистка ввода
     read -rp "Домен панели (panel.example.com): " PANEL_DOMAIN
     PANEL_DOMAIN=$(clean_input "$PANEL_DOMAIN" | tr '[:upper:]' '[:lower:]')
     
@@ -80,14 +77,11 @@ collect_input() {
     SSL_EMAIL=$(clean_input "$SSL_EMAIL")
     
     read -rp "Порт панели [8080]: " input_port
-    if [[ -n "$input_port" ]]; then
-        PANEL_PORT="$input_port"
-    fi
+    [[ -n "$input_port" ]] && PANEL_PORT="$input_port"
     
     read -rp "Включить BBR? [y/N]: " bbr_input
     [[ "$bbr_input" =~ ^[Yy]$ ]] && ENABLE_BBR="yes"
     
-    # Генерация паролей
     ADMIN_PASS=$(generate_password 24)
     HYSTERIA_PASS=$(generate_password 32)
     NAIVE_PASS=$(generate_password 32)
@@ -150,6 +144,7 @@ install_caddy() {
     log_success "Caddy установлен"
 }
 
+# ИСПРАВЛЕНО: правильный URL для Hysteria 2
 install_hysteria() {
     log_info "Установка Hysteria 2..."
     
@@ -157,15 +152,27 @@ install_hysteria() {
     latest_ver=$(curl -s https://api.github.com/repos/apernet/hysteria/releases/latest | \
         jq -r '.tag_name' | sed 's/^v//')
     
+    [[ -z "$latest_ver" || "$latest_ver" == "null" ]] && die "Не удалось получить версию Hysteria"
+    
     local arch="amd64"
     [[ "$(uname -m)" == "aarch64" ]] && arch="arm64"
     
-    curl -fsSL "https://github.com/apernet/hysteria/releases/download/v${latest_ver}/hysteria-linux-${arch}" \
-        -o /usr/local/bin/hysteria
+    log_info "Скачиваю Hysteria v${latest_ver} для ${arch}..."
+    
+    # ПРАВИЛЬНЫЙ URL для Hysteria 2
+    local download_url="https://github.com/apernet/hysteria/releases/download/app/v${latest_ver}/hysteria-linux-${arch}"
+    
+    if ! curl -fsSL "$download_url" -o /usr/local/bin/hysteria; then
+        # Пробуем альтернативный URL
+        download_url="https://github.com/apernet/hysteria/releases/download/v${latest_ver}/hysteria-linux-${arch}"
+        curl -fsSL "$download_url" -o /usr/local/bin/hysteria || die "Не удалось скачать Hysteria"
+    fi
+    
     chmod +x /usr/local/bin/hysteria
     
     mkdir -p "${CONFIG_DIR}"
-    # ИСПРАВЛЕНО: правильные пути к SSL
+    
+    # ИСПРАВЛЕНО: используем пути где Caddy хранит сертификаты
     cat > "${CONFIG_DIR}/hysteria.json" << EOF
 {
     "listen": ":443",
@@ -188,11 +195,13 @@ install_hysteria() {
         "up": "100 mbps",
         "down": "500 mbps"
     },
-    "speedTest": true
+    "speedTest": true,
+    "ignoreClientBandwidth": false,
+    "disableUDP": false
 }
 EOF
     
-    log_success "Hysteria 2 установлен"
+    log_success "Hysteria 2 установлен (v${latest_ver})"
 }
 
 setup_mask_site() {
@@ -431,7 +440,7 @@ async def create_user(user_in: dict, current_admin: dict = Depends(get_current_a
     
     domain = get_server_config().get("mask_domain", "example.com")
     return {"id": user_id, "username": username,
-            "hysteria_uri": f"hy2://{hysteria_pass}@{domain}:443?sni={domain}",
+            "hysteria_uri": f"hysteria2://{hysteria_pass}@{domain}:443?sni={domain}&insecure=0",
             "naive_uri": f"https://{username}:{naive_pass}@{domain}:443",
             "created_at": datetime.now().isoformat(), "is_active": True}
 
@@ -443,7 +452,7 @@ async def list_users(current_admin: dict = Depends(get_current_admin)):
         rows = cursor.fetchall()
     domain = get_server_config().get("mask_domain", "example.com")
     return [{"id": r["id"], "username": r["username"],
-             "hysteria_uri": f"hy2://{r['hysteria_password']}@{domain}:443?sni={domain}",
+             "hysteria_uri": f"hysteria2://{r['hysteria_password']}@{domain}:443?sni={domain}&insecure=0",
              "naive_uri": f"https://{r['username']}:{r['naive_password']}@{domain}:443",
              "created_at": r["created_at"], "is_active": bool(r["is_active"])} for r in rows]
 
@@ -465,7 +474,7 @@ async def generate_config(user_id: int, config_type: str,
         raise HTTPException(status_code=404, detail="Not found")
     domain = get_server_config().get("mask_domain", "example.com")
     if config_type == "hysteria":
-        config = f"hy2://{user['hysteria_password']}@{domain}:443?sni={domain}"
+        config = f"hysteria2://{user['hysteria_password']}@{domain}:443?sni={domain}&insecure=0"
     else:
         config = f"https://{user['username']}:{user['naive_password']}@{domain}:443"
     return JSONResponse(content=config, media_type="text/plain")
@@ -675,47 +684,69 @@ EOF
     log_success "Systemd настроен"
 }
 
-# ИСПРАВЛЕНО: правильная настройка Caddy с SSL
+# ИСПРАВЛЕНО: правильная конфигурация Caddy
 configure_caddy() {
     log_info "Настройка Caddy..."
     
+    # Сначала создаем простую конфигурацию для получения SSL
     cat > /etc/caddy/Caddyfile << EOF
+${MASK_DOMAIN} {
+    tls ${SSL_EMAIL}
+    root * ${WWW_DIR}
+    file_server
+}
+
 ${PANEL_DOMAIN} {
     tls ${SSL_EMAIL}
     reverse_proxy 127.0.0.1:${PANEL_PORT}
 }
+EOF
 
+    # Запускаем Caddy для получения SSL
+    systemctl enable caddy
+    systemctl start caddy
+    
+    # Ждем выпуска сертификатов
+    log_info "Ожидание выпуска SSL сертификатов (30 сек)..."
+    sleep 30
+    
+    # Проверяем и копируем сертификаты
+    if [[ -d /etc/caddy/certs/${MASK_DOMAIN} ]]; then
+        cp /etc/caddy/certs/${MASK_DOMAIN}/fullchain.pem /etc/ssl/certs/${MASK_DOMAIN}.crt 2>/dev/null || true
+        cp /etc/caddy/certs/${MASK_DOMAIN}/key.pem /etc/ssl/private/${MASK_DOMAIN}.key 2>/dev/null || true
+        chmod 600 /etc/ssl/private/${MASK_DOMAIN}.key 2>/dev/null || true
+    fi
+    
+    # Теперь обновляем Caddyfile с NaiveProxy
+    cat > /etc/caddy/Caddyfile << EOF
 ${MASK_DOMAIN} {
     tls ${SSL_EMAIL}
-    handle {
+    
+    # NaiveProxy (forward_proxy плагин)
+    @naive {
+        path /naive
+    }
+    handle @naive {
         forward_proxy {
             basic_auth ${NAIVE_USER} ${NAIVE_PASS}
             hide_ip
             hide_via
         }
     }
+    
+    # Маскировочный сайт
     root * ${WWW_DIR}
     file_server
 }
+
+${PANEL_DOMAIN} {
+    tls ${SSL_EMAIL}
+    reverse_proxy 127.0.0.1:${PANEL_PORT}
+}
 EOF
 
-    # Копируем SSL сертификаты для Hysteria
-    mkdir -p /etc/ssl/certs /etc/ssl/private
-    
-    # Запускаем Caddy для получения SSL
-    systemctl enable --now caddy
-    sleep 5
-    
-    # Ждем пока Caddy получит сертификаты
-    log_info "Ожидание выпуска SSL сертификатов..."
-    sleep 10
-    
-    # Копируем сертификаты из Caddy
-    if [[ -f /etc/caddy/certs/${MASK_DOMAIN}/fullchain.pem ]]; then
-        cp /etc/caddy/certs/${MASK_DOMAIN}/fullchain.pem /etc/ssl/certs/${MASK_DOMAIN}.crt
-        cp /etc/caddy/certs/${MASK_DOMAIN}/key.pem /etc/ssl/private/${MASK_DOMAIN}.key
-        chmod 600 /etc/ssl/private/${MASK_DOMAIN}.key
-    fi
+    # Перезапускаем Caddy с новой конфигурацией
+    systemctl restart caddy
     
     log_success "Caddy настроен"
 }
@@ -737,6 +768,7 @@ save_config() {
 EOF
     chmod 600 "${DATA_DIR}/server_config.json"
     
+    # Обновляем пароль админа
     python3 << PYEOF
 import sys
 sys.path.insert(0, '${BACKEND_DIR}')
@@ -754,7 +786,7 @@ PYEOF
     log_success "Конфигурация сохранена"
 }
 
-# ИСПРАВЛЕНО: правильный вывод без \n
+# ИСПРАВЛЕНО: правильный вывод URI
 print_final() {
     clear
     echo ""
@@ -769,11 +801,11 @@ print_final() {
     printf "  Пароль: %s\n" "${ADMIN_PASS}"
     echo ""
     
-    echo -e "${BLUE}Hysteria2:${NC}"
-    printf "  hy2://%s@%s:443?sni=%s\n" "${HYSTERIA_PASS}" "${MASK_DOMAIN}" "${MASK_DOMAIN}"
+    echo -e "${BLUE}Hysteria2 (актуальный формат):${NC}"
+    printf "  hysteria2://%s@%s:443?sni=%s&insecure=0\n" "${HYSTERIA_PASS}" "${MASK_DOMAIN}" "${MASK_DOMAIN}"
     echo ""
     
-    echo -e "${BLUE}NaiveProxy:${NC}"
+    echo -e "${BLUE}NaiveProxy (актуальный формат):${NC}"
     printf "  https://%s:%s@%s:443\n" "${NAIVE_USER}" "${NAIVE_PASS}" "${MASK_DOMAIN}"
     echo ""
     
