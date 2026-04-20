@@ -15,10 +15,8 @@ read -p "📧 Email для Let's Encrypt: " LETS_EMAIL
 read -p "🔌 Порт для Hysteria 2 [по умолчанию 443]: " HY_PORT
 HY_PORT=${HY_PORT:-443}
 read -p "🔑 Пароль администратора панели (минимум 12 символов): " ADMIN_PASS
-read -p "🛡️ Включить UFW firewall? (y/n, по умолчанию y): " ENABLE_UFW
-ENABLE_UFW=${ENABLE_UFW:-y}
-read -p "⚡ Включить BBR? (y/n, по умолчанию y): " ENABLE_BBR
-ENABLE_BBR=${ENABLE_BBR:-y}
+read -p "🛡️ Включить UFW firewall? (y/n): " ENABLE_UFW
+read -p "⚡ Включить BBR? (y/n): " ENABLE_BBR
 
 if [[ -z "$PANEL_DOMAIN" || -z "$MASK_DOMAIN" || -z "$LETS_EMAIL" || -z "$ADMIN_PASS" ]]; then
   echo "❌ Все обязательные поля должны быть заполнены!"
@@ -50,26 +48,28 @@ if [[ "$HY_PORT" -lt 1024 ]]; then
   setcap 'cap_net_bind_service=+ep' /usr/local/bin/hysteria
 fi
 
-# ====================== СОЗДАНИЕ ДИРЕКТОРИЙ ======================
-mkdir -p /etc/hysteria /var/lib/hysteria /opt/hysteria-panel/static /var/www/mask
+# ====================== ДИРЕКТОРИИ ======================
+mkdir -p /etc/hysteria /opt/hysteria-panel/static /var/www/mask
 
-# ====================== КОПИРОВАНИЕ ФАЙЛОВ ПАНЕЛИ ИЗ РЕПОЗИТОРИЯ ======================
-echo "📂 Копируем файлы панели..."
+# ====================== КОПИРОВАНИЕ ФАЙЛОВ ПАНЕЛИ ======================
+echo "📂 Скачиваем файлы панели из репозитория..."
 
-# Скачиваем main.py и index.html напрямую из репозитория
-curl -fsSL https://raw.githubusercontent.com/itilischool/Histeria-2-panel-by-itilischool/main/panel/main.py -o /opt/hysteria-panel/main.py
-curl -fsSL https://raw.githubusercontent.com/itilischool/Histeria-2-panel-by-itilischool/main/panel/static/index.html -o /opt/hysteria-panel/static/index.html
+curl -fsSL https://raw.githubusercontent.com/itilischool/Histeria-2-panel-by-itilischool/main/panel/main.py \
+  -o /opt/hysteria-panel/main.py
 
-# Заменяем плейсхолдер пароля администратора
+curl -fsSL https://raw.githubusercontent.com/itilischool/Histeria-2-panel-by-itilischool/main/panel/static/index.html \
+  -o /opt/hysteria-panel/static/index.html
+
+# Заменяем пароль администратора в коде
 sed -i "s/__ADMIN_PASS_PLACEHOLDER__/${ADMIN_PASS}/g" /opt/hysteria-panel/main.py
 
-# ====================== УСТАНОВКА ЗАВИСИМОСТЕЙ ПАНЕЛИ ======================
+# ====================== УСТАНОВКА ЗАВИСИМОСТЕЙ ======================
 cd /opt/hysteria-panel
 python3 -m venv venv
 venv/bin/pip install --upgrade pip
 venv/bin/pip install fastapi uvicorn pydantic PyJWT==2.8.0 bcrypt pyyaml python-multipart
 
-# ====================== БАЗОВЫЙ CONFIG HYSTERIA ======================
+# ====================== CONFIG HYSTERIA ======================
 cat > /etc/hysteria/config.yaml << EOF
 listen: :${HY_PORT}
 
@@ -97,7 +97,7 @@ quic:
   maxIdleTimeout: 60s
 EOF
 
-# ====================== SYSTEMD СЕРВИСЫ ======================
+# ====================== SYSTEMD ======================
 cat > /etc/systemd/system/hysteria.service << EOF
 [Unit]
 Description=Hysteria 2 Server
@@ -138,15 +138,15 @@ systemctl enable --now hysteria
 systemctl enable --now hysteria-panel
 
 # ====================== NGINX + МАСКИРОВКА ======================
-echo "🌐 Настраиваем Nginx..."
+echo "🌐 Настраиваем Nginx и маскировочный сайт..."
 
 cat > /var/www/mask/index.html << 'HTML'
 <!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Daily Tech News</title><style>body{font-family:system-ui;background:#0f0f0f;color:#ddd;padding:40px;line-height:1.7}</style></head>
+<html><head><meta charset="utf-8"><title>Tech Insights</title><style>body{font-family:system-ui;background:#0a0a0a;color:#ddd;padding:40px;line-height:1.6}</style></head>
 <body>
-<h1>📰 Daily Tech Blog</h1>
-<p>Последние новости из мира технологий и кибербезопасности.</p>
-<p>Сегодня обсуждаем: современные протоколы обхода блокировок.</p>
+<h1>🚀 Tech Insights</h1>
+<p>Актуальные статьи о технологиях, безопасности и разработке.</p>
+<p>Сегодня в выпуске: современные протоколы для защищённого соединения.</p>
 </body></html>
 HTML
 
@@ -186,13 +186,12 @@ nginx -t && systemctl reload nginx
 
 # ====================== LET'S ENCRYPT ======================
 echo "🔐 Получаем SSL-сертификаты..."
-certbot certonly --nginx \
-  --domains "${PANEL_DOMAIN},${MASK_DOMAIN}" \
+certbot certonly --nginx --domains "${PANEL_DOMAIN},${MASK_DOMAIN}" \
   --non-interactive --agree-tos --email "${LETS_EMAIL}" --redirect || true
 
 # ====================== UFW ======================
 if [[ "$ENABLE_UFW" == "y" || "$ENABLE_UFW" == "Y" ]]; then
-  echo "🔥 Настраиваем Firewall (UFW)..."
+  echo "🔥 Настраиваем UFW..."
   ufw default deny incoming
   ufw default allow outgoing
   ufw allow ssh
@@ -202,19 +201,11 @@ if [[ "$ENABLE_UFW" == "y" || "$ENABLE_UFW" == "Y" ]]; then
   ufw --force enable
 fi
 
-# ====================== ФИНАЛЬНЫЙ ВЫВОД ======================
+# ====================== ФИНАЛ ======================
 echo ""
 echo "✅ УСТАНОВКА УСПЕШНО ЗАВЕРШЕНА!"
+echo "🌐 Панель: https://${PANEL_DOMAIN}   (admin / ${ADMIN_PASS})"
+echo "🌍 Маскировка: https://${MASK_DOMAIN}"
+echo "🔌 Hysteria порт: ${HY_PORT} (UDP)"
 echo ""
-echo "🌐 Панель управления: https://${PANEL_DOMAIN}"
-echo "👤 Логин: admin"
-echo "🔑 Пароль: ${ADMIN_PASS}"
-echo ""
-echo "🌍 Маскировочный сайт: https://${MASK_DOMAIN}"
-echo "🔌 Hysteria 2 порт: ${HY_PORT} (UDP)"
-echo ""
-echo "📋 Команда для просмотра статуса:"
-echo "   systemctl status hysteria hysteria-panel nginx"
-echo ""
-echo "🗑️  Для удаления выполните:"
-echo "   /opt/hysteria-panel/uninstall.sh"
+echo "Для удаления: /opt/hysteria-panel/uninstall.sh"
