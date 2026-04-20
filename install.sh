@@ -1,8 +1,11 @@
 #!/bin/bash
-# ================================================
-# Hysteria 2 + Web Panel Installer
-# Оптимизировано для: bash <(curl -fsSL ...)
-# ================================================
+# Hysteria 2 + Web Panel Installer - Fixed for CRLF
+
+# Убираем возможные \r прямо в начале
+if [[ "$(head -c 1 "$0" | tr -d '\r')" != "#!" ]]; then
+  echo "Обнаружены неправильные окончания строк. Запускаем очистку..."
+  exec bash <(curl -fsSL https://raw.githubusercontent.com/itilischool/Histeria-2-panel-by-itilischool/main/install.sh | tr -d '\r')
+fi
 
 set -eo pipefail
 
@@ -18,50 +21,45 @@ read -p "Пароль администратора (минимум 12 симво
 read -p "Включить UFW firewall? (y/n): " ENABLE_UFW
 read -p "Включить BBR? (y/n): " ENABLE_BBR
 
-# Проверка обязательных полей
 if [[ -z "$PANEL_DOMAIN" || -z "$MASK_DOMAIN" || -z "$LETS_EMAIL" || -z "$ADMIN_PASS" ]]; then
   echo "Ошибка: Все обязательные поля должны быть заполнены!"
   exit 1
 fi
 
 if [[ ${#ADMIN_PASS} -lt 12 ]]; then
-  echo "Ошибка: Пароль администратора должен быть не менее 12 символов!"
+  echo "Ошибка: Пароль должен быть не менее 12 символов!"
   exit 1
 fi
 
-# ====================== ПОДГОТОВКА СИСТЕМЫ ======================
+# ====================== ПОДГОТОВКА ======================
 apt-get update -qq && apt-get upgrade -y -qq
 apt-get install -y curl wget nginx python3 python3-venv python3-pip certbot python3-certbot-nginx ufw sqlite3
 
-# BBR
 if [[ "$ENABLE_BBR" =~ ^[Yy] ]]; then
   echo "Включаем BBR..."
   echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
   sysctl -p >/dev/null
 fi
 
-# ====================== УСТАНОВКА HYSTERIA 2 ======================
+# ====================== HYSTERIA 2 ======================
 echo "Устанавливаем Hysteria 2..."
 curl -Lo /usr/local/bin/hysteria https://download.hysteria.network/app/latest/hysteria-linux-amd64
 chmod +x /usr/local/bin/hysteria
 
 mkdir -p /etc/hysteria /opt/hysteria-panel/static /var/www/mask
 
-# ====================== СКАЧИВАНИЕ ПАНЕЛИ ======================
-echo "Скачиваем файлы панели..."
+# ====================== ПАНЕЛЬ ======================
+echo "Скачиваем панель управления..."
 curl -fsSL https://raw.githubusercontent.com/itilischool/Histeria-2-panel-by-itilischool/main/panel/main.py -o /opt/hysteria-panel/main.py
 curl -fsSL https://raw.githubusercontent.com/itilischool/Histeria-2-panel-by-itilischool/main/panel/static/index.html -o /opt/hysteria-panel/static/index.html
 
-# Замена пароля администратора
 sed -i "s/__ADMIN_PASS_PLACEHOLDER__/${ADMIN_PASS}/g" /opt/hysteria-panel/main.py
 
-# ====================== УСТАНОВКА ЗАВИСИМОСТЕЙ ПАНЕЛИ ======================
 cd /opt/hysteria-panel
 python3 -m venv venv
-venv/bin/pip install -q --upgrade pip
 venv/bin/pip install -q fastapi uvicorn pydantic PyJWT==2.8.0 bcrypt pyyaml python-multipart
 
-# ====================== КОНФИГ HYSTERIA ======================
+# ====================== HYSTERIA CONFIG ======================
 cat > /etc/hysteria/config.yaml << EOF
 listen: :${HY_PORT}
 
@@ -82,7 +80,7 @@ masquerade:
     rewriteHost: true
 EOF
 
-# ====================== SYSTEMD СЕРВИСЫ ======================
+# ====================== SYSTEMD ======================
 cat > /etc/systemd/system/hysteria.service << 'EOT'
 [Unit]
 Description=Hysteria 2 Server
@@ -173,7 +171,7 @@ certbot certonly --nginx --domains "${PANEL_DOMAIN},${MASK_DOMAIN}" \
 
 # ====================== UFW ======================
 if [[ "$ENABLE_UFW" =~ ^[Yy] ]]; then
-  echo "Настраиваем UFW firewall..."
+  echo "Настраиваем UFW..."
   ufw default deny incoming
   ufw default allow outgoing
   ufw allow ssh
@@ -183,7 +181,7 @@ if [[ "$ENABLE_UFW" =~ ^[Yy] ]]; then
   ufw --force enable
 fi
 
-# ====================== СОЗДАНИЕ UNINSTALL ======================
+# ====================== UNINSTALL ======================
 cat > /opt/hysteria-panel/uninstall.sh << 'UNINST'
 #!/bin/bash
 echo "Удаление Hysteria 2 и панели..."
@@ -193,22 +191,19 @@ rm -f /etc/systemd/system/hysteria.service /etc/systemd/system/hysteria-panel.se
 rm -rf /etc/hysteria /opt/hysteria-panel /var/www/mask /usr/local/bin/hysteria
 rm -f /etc/nginx/sites-enabled/panel /etc/nginx/sites-enabled/mask
 nginx -t && systemctl restart nginx 2>/dev/null || true
-echo "Удаление завершено успешно."
+echo "Удаление завершено."
 UNINST
 
 chmod +x /opt/hysteria-panel/uninstall.sh
 
-# ====================== ФИНАЛЬНЫЙ ВЫВОД ======================
+# ====================== ФИНАЛ ======================
 echo ""
 echo "=================================================="
 echo "УСТАНОВКА УСПЕШНО ЗАВЕРШЕНА!"
 echo "=================================================="
-echo "Панель управления: https://${PANEL_DOMAIN}"
-echo "Логин: admin"
-echo "Пароль: ${ADMIN_PASS}"
-echo "Маскировочный сайт: https://${MASK_DOMAIN}"
-echo "Hysteria порт: ${HY_PORT} (UDP)"
+echo "Панель:     https://${PANEL_DOMAIN}   (admin / ${ADMIN_PASS})"
+echo "Маскировка: https://${MASK_DOMAIN}"
+echo "Hysteria:   UDP ${HY_PORT}"
 echo ""
-echo "Для удаления всей системы выполните:"
-echo "   /opt/hysteria-panel/uninstall.sh"
+echo "Удалить всё: /opt/hysteria-panel/uninstall.sh"
 echo "=================================================="
