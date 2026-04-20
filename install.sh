@@ -1,9 +1,12 @@
 #!/bin/bash
-# Hysteria 2 + Web Panel Installer - Fixed for CRLF
+# ================================================
+# Hysteria 2 + Web Panel Installer
+# Специальная версия с самоочисткой от CRLF
+# ================================================
 
-# Убираем возможные \r прямо в начале
-if [[ "$(head -c 1 "$0" | tr -d '\r')" != "#!" ]]; then
-  echo "Обнаружены неправильные окончания строк. Запускаем очистку..."
+# Самоочистка от Windows CRLF
+if [[ -n "$(cat "$0" | tr -d '\r' | cmp -s - <(cat "$0"))" ]]; then
+  echo "Обнаружены неправильные окончания строк. Очищаем и перезапускаем..."
   exec bash <(curl -fsSL https://raw.githubusercontent.com/itilischool/Histeria-2-panel-by-itilischool/main/install.sh | tr -d '\r')
 fi
 
@@ -18,7 +21,7 @@ read -p "Email для Let's Encrypt: " LETS_EMAIL
 read -p "Порт для Hysteria 2 [8443]: " HY_PORT
 HY_PORT=${HY_PORT:-8443}
 read -p "Пароль администратора (минимум 12 символов): " ADMIN_PASS
-read -p "Включить UFW firewall? (y/n): " ENABLE_UFW
+read -p "Включить UFW? (y/n): " ENABLE_UFW
 read -p "Включить BBR? (y/n): " ENABLE_BBR
 
 if [[ -z "$PANEL_DOMAIN" || -z "$MASK_DOMAIN" || -z "$LETS_EMAIL" || -z "$ADMIN_PASS" ]]; then
@@ -59,7 +62,7 @@ cd /opt/hysteria-panel
 python3 -m venv venv
 venv/bin/pip install -q fastapi uvicorn pydantic PyJWT==2.8.0 bcrypt pyyaml python-multipart
 
-# ====================== HYSTERIA CONFIG ======================
+# ====================== CONFIG HYSTERIA ======================
 cat > /etc/hysteria/config.yaml << EOF
 listen: :${HY_PORT}
 
@@ -201,7 +204,9 @@ echo ""
 echo "=================================================="
 echo "УСТАНОВКА УСПЕШНО ЗАВЕРШЕНА!"
 echo "=================================================="
-echo "Панель:     https://${PANEL_DOMAIN}   (admin / ${ADMIN_PASS})"
+echo "Панель:     https://${PANEL_DOMAIN}"
+echo "Логин:      admin"
+echo "Пароль:     ${ADMIN_PASS}"
 echo "Маскировка: https://${MASK_DOMAIN}"
 echo "Hysteria:   UDP ${HY_PORT}"
 echo ""
