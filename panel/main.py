@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Form
+from fastapi import FastAPI, Depends, HTTPException, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -7,14 +7,11 @@ import jwt
 import bcrypt
 import yaml
 import subprocess
-import os
 from datetime import datetime, timedelta
-from typing import List
 
 app = FastAPI(title="Hysteria 2 Panel")
-SECRET_KEY = "super-secret-key-change-in-production-2026"
+SECRET_KEY = "change-this-in-production-2026"
 ALGORITHM = "HS256"
-
 DB_PATH = "/opt/hysteria-panel/users.db"
 
 def get_db():
@@ -35,7 +32,7 @@ def init_db():
 
 init_db()
 
-# Пароль администратора будет заменён при установке
+# Пароль админа заменяется при установке
 ADMIN_HASH = bcrypt.hashpw(b'__ADMIN_PASS_PLACEHOLDER__', bcrypt.gensalt()).decode()
 
 class UserCreate(BaseModel):
@@ -44,51 +41,44 @@ class UserCreate(BaseModel):
 
 def create_jwt(data: dict):
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(hours=24)
-    to_encode.update({"exp": expire})
+    to_encode.update({"exp": datetime.utcnow() + timedelta(hours=24)})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def verify_token(token: str = None):
-    if not token:
-        raise HTTPException(status_code=401, detail="Token required")
+def verify_token(token: str):
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 def get_config():
-    with open("/etc/hysteria/config.yaml", "r") as f:
+    with open("/etc/hysteria/config.yaml") as f:
         return yaml.safe_load(f)
 
 def save_config(config):
     with open("/etc/hysteria/config.yaml", "w") as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        yaml.dump(config, f, default_flow_style=False)
     subprocess.run(["systemctl", "restart", "hysteria"], check=True)
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    with open("/opt/hysteria-panel/static/index.html", "r", encoding="utf-8") as f:
+    with open("/opt/hysteria-panel/static/index.html", encoding="utf-8") as f:
         return f.read()
 
 @app.post("/api/login")
 async def login(username: str = Form(...), password: str = Form(...)):
-    if username != "admin":
-        raise HTTPException(401, "Неверный логин")
-    if not bcrypt.checkpw(password.encode(), ADMIN_HASH.encode()):
-        raise HTTPException(401, "Неверный пароль")
-    token = create_jwt({"sub": "admin"})
-    return {"access_token": token, "token_type": "bearer"}
+    if username != "admin" or not bcrypt.checkpw(password.encode(), ADMIN_HASH.encode()):
+        raise HTTPException(401, "Неверный логин или пароль")
+    return {"access_token": create_jwt({"sub": "admin"}), "token_type": "bearer"}
 
 @app.get("/api/users")
-async def list_users(token: str = Depends(verify_token)):
+async def list_users(token: dict = Depends(verify_token)):
     conn = get_db()
     users = conn.execute("SELECT username, created_at FROM users").fetchall()
     conn.close()
     return {"users": [dict(u) for u in users]}
 
 @app.post("/api/users")
-async def create_user(user: UserCreate, token: str = Depends(verify_token)):
+async def create_user(user: UserCreate, token: dict = Depends(verify_token)):
     conn = get_db()
     try:
         conn.execute("INSERT INTO users (username, password, created_at) VALUES (?, ?, ?)",
@@ -100,27 +90,24 @@ async def create_user(user: UserCreate, token: str = Depends(verify_token)):
         conn.close()
 
     config = get_config()
-    if "auth" not in config or "userpass" not in config["auth"]:
-        config.setdefault("auth", {})["userpass"] = {}
-    config["auth"]["userpass"][user.username] = user.password
+    config.setdefault("auth", {}).setdefault("userpass", {})[user.username] = user.password
     save_config(config)
     return {"status": "ok"}
 
 @app.delete("/api/users/{username}")
-async def delete_user(username: str, token: str = Depends(verify_token)):
+async def delete_user(username: str, token: dict = Depends(verify_token)):
     conn = get_db()
     conn.execute("DELETE FROM users WHERE username=?", (username,))
     conn.commit()
     conn.close()
 
     config = get_config()
-    if "auth" in config and "userpass" in config["auth"] and username in config["auth"]["userpass"]:
-        del config["auth"]["userpass"][username]
-        save_config(config)
+    config.get("auth", {}).get("userpass", {}).pop(username, None)
+    save_config(config)
     return {"status": "ok"}
 
 @app.get("/api/config/{username}")
-async def get_client_config(username: str, token: str = Depends(verify_token)):
+async def get_client_config(username: str, token: dict = Depends(verify_token)):
     config = get_config()
     pw = config.get("auth", {}).get("userpass", {}).get(username)
     if not pw:
@@ -128,6 +115,6 @@ async def get_client_config(username: str, token: str = Depends(verify_token)):
     port = str(config["listen"]).split(":")[-1]
     domain = config["acme"]["domains"][0]
     return {
-        "uri": f"hysteria2://{username}:{pw}@{domain}:{port}/?insecure=0",
-        "yaml": f"server: {domain}:{port}\nauth: {username}:{pw}\ntls:\n  sni: {domain}\n  insecure: false\n"
+        "uri": f"hysteria2://{username}:{pw}@{domain}:{port}/",
+        "yaml": f"server: {domain}:{port}\nauth: {username}:{pw}\ntls:\n  sni: {domain}\n  insecure: false"
     }
