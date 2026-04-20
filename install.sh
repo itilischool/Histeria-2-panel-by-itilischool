@@ -1,9 +1,12 @@
 #!/bin/bash
 #===============================================================================
-# VPN/PANEL MANAGER - Fixed Installer
+# VPN/PANEL MANAGER - Production Ready Installer
+# Hysteria2 + NaiveProxy + Web Management Panel
 #===============================================================================
 
-set -e
+# Логирование
+exec > >(tee -a /tmp/vpn-install.log) 2>&1
+echo "=== Installation started at $(date) ==="
 
 # Цвета
 RED='\033[0;31m'
@@ -19,7 +22,7 @@ DATA_DIR="${INSTALL_DIR}/data"
 LOGS_DIR="${INSTALL_DIR}/logs"
 WWW_DIR="${INSTALL_DIR}/www/mask"
 BACKEND_DIR="${INSTALL_DIR}/backend"
-FRONTEND_DIR="${INSTALLEND_DIR}/frontend"
+FRONTEND_DIR="${INSTALL_DIR}/frontend"
 
 # Переменные
 PANEL_DOMAIN=""
@@ -39,6 +42,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 die() {
     log_error "$1"
+    echo "See /tmp/vpn-install.log for details"
     exit 1
 }
 
@@ -90,19 +94,25 @@ collect_input() {
     echo ""
     
     read -rp "Продолжить? [Y/n]: " confirm
-    [[ "$confirm" =~ ^[Nn]$ ]] && die "Отменено"
+    
+    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+        echo "Отменено пользователем"
+        exit 0
+    fi
+    
+    log_info "Начинаю установку..."
 }
 
 prepare_system() {
     log_info "Обновление системы..."
-    apt-get update -qq
-    apt-get upgrade -y -qq
+    apt-get update -qq || die "Failed to update"
+    apt-get upgrade -y -qq || die "Failed to upgrade"
     
     log_info "Установка зависимостей..."
     apt-get install -y -qq \
         curl wget git unzip socat cron jq \
         python3 python3-pip python3-venv \
-        ca-certificates gnupg
+        ca-certificates gnupg || die "Failed to install deps"
     
     log_success "Система готова"
 }
@@ -180,7 +190,7 @@ EOF
 }
 
 setup_mask_site() {
-    log_info "Настройка маскировочного сайта..."
+    log_info "Настройка сайта..."
     mkdir -p "${WWW_DIR}"
     
     cat > "${WWW_DIR}/index.html" << 'EOF'
@@ -190,25 +200,23 @@ setup_mask_site() {
     <meta charset="UTF-8">
     <title>Welcome</title>
     <style>
-        body{font-family:sans-serif;text-align:center;padding:50px;background:#f5f5f5}
-        h1{color:#333}
-        p{color:#666}
+        body{font-family:sans-serif;text-align:center;padding:50px;background:#f5f5f5;margin:0}
+        h1{color:#333}p{color:#666}
     </style>
 </head>
 <body>
-    <h1>Welcome to Our Service</h1>
-    <p>Fast, secure, and reliable hosting.</p>
+    <h1>Welcome</h1>
+    <p>Professional hosting services</p>
 </body>
 </html>
 EOF
-    log_success "Сайт настроен"
+    log_success "Сайт создан"
 }
 
 create_backend() {
     log_info "Создание backend..."
     mkdir -p "${BACKEND_DIR}"
     
-    # requirements.txt
     cat > "${BACKEND_DIR}/requirements.txt" << 'EOF'
 fastapi==0.109.2
 uvicorn[standard]==0.27.1
@@ -221,7 +229,6 @@ aiofiles==23.2.1
 psutil==5.9.8
 EOF
 
-    # database.py
     cat > "${BACKEND_DIR}/database.py" << 'EOF'
 import sqlite3
 from pathlib import Path
@@ -280,13 +287,12 @@ def log_event(level, message):
         conn.commit()
 EOF
 
-    # auth.py
     cat > "${BACKEND_DIR}/auth.py" << 'EOF'
 from datetime import datetime, timedelta
 from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pathlib import Path
 import secrets
@@ -324,11 +330,11 @@ def decode_token(token: str) -> Optional[dict]:
 
 async def get_current_admin(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
     if not credentials:
-        raise HTTPException(status_code=401, detail="Требуется авторизация",
+        raise HTTPException(status_code=401, detail="Auth required",
                           headers={"WWW-Authenticate": "Bearer"})
     payload = decode_token(credentials.credentials)
     if not payload or payload.get("type") != "admin":
-        raise HTTPException(status_code=401, detail="Неверные данные",
+        raise HTTPException(status_code=401, detail="Invalid auth",
                           headers={"WWW-Authenticate": "Bearer"})
     return payload
 
@@ -345,37 +351,26 @@ def get_admin_from_db(username: str) -> Optional[dict]:
     return None
 EOF
 
-    # main.py (упрощенная версия)
     cat > "${BACKEND_DIR}/main.py" << 'EOF'
 #!/usr/bin/env python3
-import logging
-import sys
+import logging, sys, json, secrets, string, subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-
 from database import init_db, get_db, log_event
-from auth import (
-    get_password_hash, verify_password, create_access_token,
-    get_current_admin, get_admin_from_db, ACCESS_TOKEN_EXPIRE_MINUTES
-)
+from auth import (get_password_hash, verify_password, create_access_token,
+                  get_current_admin, get_admin_from_db, ACCESS_TOKEN_EXPIRE_MINUTES)
 
 LOG_FILE = Path("/opt/vpn-panel/logs/panel.log")
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
+logging.basicConfig(level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger("panel")
 
 init_db()
@@ -387,24 +382,14 @@ async def lifespan(app: FastAPI):
     logger.info("Panel stopping...")
 
 app = FastAPI(title="VPN Panel", version="1.0.0", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-import secrets
-import string
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+                   allow_methods=["*"], allow_headers=["*"])
 
 def generate_password(length=32):
     chars = string.ascii_letters + string.digits + "!@#$%^&*"
     return ''.join(secrets.choice(chars) for _ in range(length))
 
 def get_server_config():
-    import json
     config_file = Path("/opt/vpn-panel/data/server_config.json")
     if config_file.exists():
         return json.loads(config_file.read_text())
@@ -414,15 +399,11 @@ def get_server_config():
 async def login(credentials: dict):
     username = credentials.get("username")
     password = credentials.get("password")
-    
     admin = get_admin_from_db(username)
     if not admin or not verify_password(password, admin["password_hash"]):
-        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
-    
-    access_token = create_access_token(
-        data={"sub": admin["username"], "type": "admin"},
-        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    access_token = create_access_token(data={"sub": admin["username"], "type": "admin"},
+                                       expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.get("/api/auth/me")
@@ -430,10 +411,7 @@ async def get_me(current_admin: dict = Depends(get_current_admin)):
     return {"username": current_admin["username"], "type": "admin"}
 
 @app.post("/api/users")
-async def create_user(
-    user_in: dict,
-    current_admin: dict = Depends(get_current_admin)
-):
+async def create_user(user_in: dict, current_admin: dict = Depends(get_current_admin)):
     username = user_in.get("username")
     password = user_in.get("password") or generate_password(24)
     hysteria_pass = generate_password(32)
@@ -444,45 +422,29 @@ async def create_user(
             cursor = conn.execute(
                 '''INSERT INTO users (username, password_hash, hysteria_password, naive_password)
                    VALUES (?, ?, ?, ?)''',
-                (username, get_password_hash(password), hysteria_pass, naive_pass)
-            )
+                (username, get_password_hash(password), hysteria_pass, naive_pass))
             conn.commit()
             user_id = cursor.lastrowid
-        except Exception as e:
-            raise HTTPException(status_code=400, detail="Пользователь существует")
+        except:
+            raise HTTPException(status_code=400, detail="User exists")
     
     domain = get_server_config().get("mask_domain", "example.com")
-    
-    return {
-        "id": user_id,
-        "username": username,
-        "hysteria_uri": f"hy2://{hysteria_pass}@{domain}:443?sni={domain}",
-        "naive_uri": f"https://{username}:{naive_pass}@{domain}:443",
-        "created_at": datetime.now().isoformat(),
-        "is_active": True
-    }
+    return {"id": user_id, "username": username,
+            "hysteria_uri": f"hy2://{hysteria_pass}@{domain}:443?sni={domain}",
+            "naive_uri": f"https://{username}:{naive_pass}@{domain}:443",
+            "created_at": datetime.now().isoformat(), "is_active": True}
 
 @app.get("/api/users")
 async def list_users(current_admin: dict = Depends(get_current_admin)):
     with get_db() as conn:
         cursor = conn.execute(
-            'SELECT id, username, hysteria_password, naive_password, created_at, is_active FROM users'
-        )
+            'SELECT id, username, hysteria_password, naive_password, created_at, is_active FROM users')
         rows = cursor.fetchall()
-    
     domain = get_server_config().get("mask_domain", "example.com")
-    
-    return [
-        {
-            "id": row["id"],
-            "username": row["username"],
-            "hysteria_uri": f"hy2://{row['hysteria_password']}@{domain}:443?sni={domain}",
-            "naive_uri": f"https://{row['username']}:{row['naive_password']}@{domain}:443",
-            "created_at": row["created_at"],
-            "is_active": bool(row["is_active"])
-        }
-        for row in rows
-    ]
+    return [{"id": r["id"], "username": r["username"],
+             "hysteria_uri": f"hy2://{r['hysteria_password']}@{domain}:443?sni={domain}",
+             "naive_uri": f"https://{r['username']}:{r['naive_password']}@{domain}:443",
+             "created_at": r["created_at"], "is_active": bool(r["is_active"])} for r in rows]
 
 @app.delete("/api/users/{user_id}")
 async def delete_user(user_id: int, current_admin: dict = Depends(get_current_admin)):
@@ -496,26 +458,19 @@ async def generate_config(user_id: int, config_type: str,
                          current_admin: dict = Depends(get_current_admin)):
     with get_db() as conn:
         cursor = conn.execute(
-            'SELECT username, hysteria_password, naive_password FROM users WHERE id = ?',
-            (user_id,)
-        )
+            'SELECT username, hysteria_password, naive_password FROM users WHERE id = ?', (user_id,))
         user = cursor.fetchone()
-    
     if not user:
-        raise HTTPException(status_code=404, detail="Не найден")
-    
+        raise HTTPException(status_code=404, detail="Not found")
     domain = get_server_config().get("mask_domain", "example.com")
-    
     if config_type == "hysteria":
         config = f"hy2://{user['hysteria_password']}@{domain}:443?sni={domain}"
     else:
         config = f"https://{user['username']}:{user['naive_password']}@{domain}:443"
-    
     return JSONResponse(content=config, media_type="text/plain")
 
 @app.get("/api/system/status")
 async def system_status(current_admin: dict = Depends(get_current_admin)):
-    import subprocess
     def get_status(name):
         try:
             result = subprocess.run(["systemctl", "is-active", name],
@@ -523,22 +478,14 @@ async def system_status(current_admin: dict = Depends(get_current_admin)):
             return result.stdout.strip()
         except:
             return "unknown"
-    
-    return {
-        "services": {
-            "hysteria": get_status("hysteria"),
-            "caddy": get_status("caddy"),
-            "panel": get_status("panel")
-        }
-    }
+    return {"services": {"hysteria": get_status("hysteria"), "caddy": get_status("caddy"),
+            "panel": get_status("panel")}}
 
 @app.get("/api/logs")
 async def get_logs(limit: int = 50, current_admin: dict = Depends(get_current_admin)):
     with get_db() as conn:
         cursor = conn.execute(
-            'SELECT id, level, message, timestamp FROM logs ORDER BY timestamp DESC LIMIT ?',
-            (limit,)
-        )
+            'SELECT id, level, message, timestamp FROM logs ORDER BY timestamp DESC LIMIT ?', (limit,))
         rows = cursor.fetchall()
     return [{"id": r["id"], "level": r["level"], "message": r["message"], 
              "timestamp": r["timestamp"]} for r in rows]
@@ -556,12 +503,10 @@ if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8080)
 EOF
 
-    # Установка зависимостей
     cd "${BACKEND_DIR}"
     python3 -m venv venv
     source venv/bin/activate
     pip install -q -r requirements.txt
-    
     log_success "Backend создан"
 }
 
@@ -569,7 +514,6 @@ create_frontend() {
     log_info "Создание frontend..."
     mkdir -p "${FRONTEND_DIR}"
     
-    # style.css
     cat > "${FRONTEND_DIR}/style.css" << 'EOF'
 :root{--primary:#2563eb;--bg:#f8fafc;--card:#fff;--text:#1e293b;--border:#e2e8f0}
 *{margin:0;padding:0;box-sizing:border-box}
@@ -578,298 +522,123 @@ body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--text)}
 .header{background:var(--card);border-bottom:1px solid var(--border);padding:1rem 0;margin-bottom:1rem}
 .header-content{display:flex;justify-content:space-between;align-items:center}
 .logo{font-size:1.25rem;font-weight:700;color:var(--primary)}
-.btn{padding:0.5rem 1rem;background:var(--primary);color:#fff;border:none;border-radius:6px;cursor:pointer}
-.btn:hover{opacity:0.9}
-.btn-sm{padding:0.375rem 0.75rem;font-size:0.875rem}
-.btn-danger{background:#ef4444}
-.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text)}
+.btn{padding:0.5rem 1rem;background:var(--primary);color:#fff;border:none;border-radius:6px;cursor:pointer;text-decoration:none;display:inline-block}
+.btn:hover{opacity:0.9}.btn-sm{padding:0.375rem 0.75rem;font-size:0.875rem}
+.btn-danger{background:#ef4444}.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text)}
 .card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1.25rem;margin-bottom:1rem}
 .card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem}
-.card-title{font-weight:600}
-.form-group{margin-bottom:1rem}
+.card-title{font-weight:600}.form-group{margin-bottom:1rem}
 .form-group label{display:block;margin-bottom:0.375rem;font-weight:500}
 .form-control{width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:6px}
-.table{width:100%;border-collapse:collapse}
-.table th,.table td{padding:0.75rem;text-align:left;border-bottom:1px solid var(--border)}
+.table{width:100%;border-collapse:collapse}.table th,.table td{padding:0.75rem;text-align:left;border-bottom:1px solid var(--border)}
 .table th{font-weight:600;font-size:0.875rem;color:#64748b}
 .alert{padding:0.75rem;border-radius:6px;margin-bottom:1rem}
-.alert-success{background:#dcfce7;color:#166534}
-.alert-error{background:#fee2e2;color:#991b1b}
+.alert-success{background:#dcfce7;color:#166534}.alert-error{background:#fee2e2;color:#991b1b}
 .modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);align-items:center;justify-content:center;z-index:1000}
-.modal.active{display:flex}
-.modal-content{background:var(--card);border-radius:8px;padding:1.5rem;max-width:500px;width:90%}
+.modal.active{display:flex}.modal-content{background:var(--card);border-radius:8px;padding:1.5rem;max-width:500px;width:90%}
 .modal-header{display:flex;justify-content:space-between;margin-bottom:1rem}
 .modal-close{background:none;border:none;font-size:1.5rem;cursor:pointer}
 .config-box{background:#f1f5f9;padding:0.75rem;border-radius:6px;font-family:monospace;font-size:0.875rem;word-break:break-all;margin:0.5rem 0}
-.flex{display:flex;gap:0.5rem}
-.hidden{display:none}
+.flex{display:flex;gap:0.5rem;align-items:center}.hidden{display:none}
 .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:0.375rem}
-.status-dot.online{background:#22c55e}
-.status-dot.offline{background:#ef4444}
+.status-dot.online{background:#22c55e}.status-dot.offline{background:#ef4444}
 EOF
 
-    # login.html
     cat > "${FRONTEND_DIR}/login.html" << 'EOF'
 <!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Login - VPN Panel</title>
-    <link rel="stylesheet" href="/static/style.css">
-    <style>body{display:flex;align-items:center;justify-content:center;min-height:100vh}</style>
-</head>
-<body>
-    <div class="card" style="max-width:400px;width:100%">
-        <h1 class="card-title" style="text-align:center;margin-bottom:1.5rem">🔐 VPN Panel</h1>
-        <form id="loginForm">
-            <div class="form-group">
-                <label>Логин</label>
-                <input type="text" id="username" class="form-control" required>
-            </div>
-            <div class="form-group">
-                <label>Пароль</label>
-                <input type="password" id="password" class="form-control" required>
-            </div>
-            <div id="error" class="alert alert-error hidden"></div>
-            <button type="submit" class="btn" style="width:100%">Войти</button>
-        </form>
-    </div>
-    <script>
-        document.getElementById('loginForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const error = document.getElementById('error');
-            try {
-                const res = await fetch('/api/auth/login', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        username: document.getElementById('username').value,
-                        password: document.getElementById('password').value
-                    })
-                });
-                const data = await res.json();
-                if (!res.ok) throw new Error(data.detail);
-                localStorage.setItem('token', data.access_token);
-                window.location.href = '/';
-            } catch (err) {
-                error.textContent = err.message;
-                error.classList.remove('hidden');
-            }
-        });
-    </script>
-</body>
-</html>
+<html><head><meta charset="UTF-8"><title>Login</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>body{display:flex;align-items:center;justify-content:center;min-height:100vh}</style>
+</head><body>
+<div class="card" style="max-width:400px;width:100%">
+<h1 class="card-title" style="text-align:center;margin-bottom:1.5rem">🔐 VPN Panel</h1>
+<form id="loginForm"><div class="form-group"><label>Логин</label>
+<input type="text" id="username" class="form-control" required></div>
+<div class="form-group"><label>Пароль</label>
+<input type="password" id="password" class="form-control" required></div>
+<div id="error" class="alert alert-error hidden"></div>
+<button type="submit" class="btn" style="width:100%">Войти</button></form></div>
+<script>
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();const error=document.getElementById('error');
+    try{const res=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({username:document.getElementById('username').value,password:document.getElementById('password').value})});
+    const data=await res.json();if(!res.ok)throw new Error(data.detail);
+    localStorage.setItem('token',data.access_token);window.location.href='/';}
+    catch(err){error.textContent=err.message;error.classList.remove('hidden');}});
+</script></body></html>
 EOF
 
-    # index.html
     cat > "${FRONTEND_DIR}/index.html" << 'EOF'
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>VPN Panel</title>
-    <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-    <header class="header">
-        <div class="container header-content">
-            <div class="logo">🚀 VPN Panel</div>
-            <div class="flex">
-                <span id="username"></span>
-                <button class="btn btn-outline btn-sm" onclick="logout()">Выйти</button>
-            </div>
-        </div>
-    </header>
-    
-    <main class="container">
-        <div id="alert" class="alert hidden"></div>
-        
-        <div class="card">
-            <div class="card-header">
-                <span class="card-title">📊 Статус</span>
-                <button class="btn btn-outline btn-sm" onclick="refreshStatus()">Обновить</button>
-            </div>
-            <div class="flex" style="gap:1.5rem">
-                <div><span class="status-dot" id="status-hysteria"></span>Hysteria: <span id="text-hysteria">...</span></div>
-                <div><span class="status-dot" id="status-caddy"></span>Caddy: <span id="text-caddy">...</span></div>
-            </div>
-        </div>
-        
-        <div class="card">
-            <div class="card-header">
-                <span class="card-title">👥 Пользователи</span>
-                <button class="btn btn-sm" onclick="openModal('userModal')">+ Добавить</button>
-            </div>
-            <table class="table">
-                <thead>
-                    <tr><th>ID</th><th>Имя</th><th>Hysteria</th><th>Naive</th><th>Действия</th></tr>
-                </thead>
-                <tbody id="usersTable"></tbody>
-            </table>
-        </div>
-    </main>
-    
-    <div id="userModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>Новый пользователь</h3>
-                <button class="modal-close" onclick="closeModal('userModal')">&times;</button>
-            </div>
-            <form id="userForm">
-                <div class="form-group">
-                    <label>Имя</label>
-                    <input type="text" id="newUsername" class="form-control" required>
-                </div>
-                <div class="form-group">
-                    <label>Пароль (опционально)</label>
-                    <input type="text" id="newPassword" class="form-control">
-                </div>
-                <button type="submit" class="btn">Создать</button>
-            </form>
-        </div>
-    </div>
-    
-    <div id="configModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>Конфигурация</h3>
-                <button class="modal-close" onclick="closeModal('configModal')">&times;</button>
-            </div>
-            <div id="configHysteria" class="config-box"></div>
-            <div id="configNaive" class="config-box"></div>
-            <div class="flex" style="margin-top:1rem">
-                <button class="btn btn-sm btn-outline" onclick="copyConfig('hysteria')">Копировать Hysteria</button>
-                <button class="btn btn-sm btn-outline" onclick="copyConfig('naive')">Копировать Naive</button>
-            </div>
-        </div>
-    </div>
-    
-    <script>
-        const token = localStorage.getItem('token');
-        if (!token) window.location.href = '/login';
-        
-        const headers = {'Authorization': `Bearer ${token}`};
-        let currentUserId = null;
-        
-        (async () => {
-            try {
-                const res = await fetch('/api/auth/me', {headers});
-                if (!res.ok) throw new Error();
-                const data = await res.json();
-                document.getElementById('username').textContent = data.username;
-                loadUsers();
-                refreshStatus();
-            } catch {
-                localStorage.removeItem('token');
-                window.location.href = '/login';
-            }
-        })();
-        
-        function logout() {
-            localStorage.removeItem('token');
-            window.location.href = '/login';
-        }
-        
-        function showAlert(msg, type='success') {
-            const alert = document.getElementById('alert');
-            alert.className = `alert alert-${type}`;
-            alert.textContent = msg;
-            alert.classList.remove('hidden');
-            setTimeout(() => alert.classList.add('hidden'), 3000);
-        }
-        
-        async function loadUsers() {
-            try {
-                const res = await fetch('/api/users', {headers});
-                const users = await res.json();
-                document.getElementById('usersTable').innerHTML = users.map(u => `
-                    <tr>
-                        <td>${u.id}</td>
-                        <td>${u.username}</td>
-                        <td><small>${u.hysteria_uri.substring(0,30)}...</small></td>
-                        <td><small>${u.naive_uri.substring(0,30)}...</small></td>
-                        <td>
-                            <button class="btn btn-sm btn-outline" onclick="showConfig(${u.id})">🔑</button>
-                            <button class="btn btn-sm btn-danger" onclick="deleteUser(${u.id})">🗑️</button>
-                        </td>
-                    </tr>
-                `).join('');
-            } catch (err) {
-                showAlert(err.message, 'error');
-            }
-        }
-        
-        document.getElementById('userForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            try {
-                const res = await fetch('/api/users', {
-                    method: 'POST',
-                    headers: {...headers, 'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        username: document.getElementById('newUsername').value,
-                        password: document.getElementById('newPassword').value || undefined
-                    })
-                });
-                if (!res.ok) throw new Error('Ошибка');
-                closeModal('userModal');
-                e.target.reset();
-                showAlert('Создан');
-                loadUsers();
-            } catch (err) {
-                showAlert(err.message, 'error');
-            }
-        });
-        
-        async function deleteUser(id) {
-            if (!confirm('Удалить?')) return;
-            try {
-                await fetch(`/api/users/${id}`, {method: 'DELETE', headers});
-                showAlert('Удален');
-                loadUsers();
-            } catch (err) {
-                showAlert(err.message, 'error');
-            }
-        }
-        
-        async function showConfig(id) {
-            currentUserId = id;
-            try {
-                const [h, n] = await Promise.all([
-                    fetch(`/api/config/generate/${id}?config_type=hysteria`, {headers}),
-                    fetch(`/api/config/generate/${id}?config_type=naive`, {headers})
-                ]);
-                document.getElementById('configHysteria').textContent = await h.text();
-                document.getElementById('configNaive').textContent = await n.text();
-                openModal('configModal');
-            } catch (err) {
-                showAlert(err.message, 'error');
-            }
-        }
-        
-        function copyConfig(type) {
-            const text = document.getElementById(`config${type==='hysteria'?'Hysteria':'Naive'}`).textContent;
-            navigator.clipboard.writeText(text).then(() => showAlert('Скопировано'));
-        }
-        
-        async function refreshStatus() {
-            try {
-                const res = await fetch('/api/system/status', {headers});
-                const data = await res.json();
-                ['hysteria', 'caddy'].forEach(svc => {
-                    const status = data.services[svc];
-                    document.getElementById(`status-${svc}`).className = 
-                        `status-dot ${status==='active'?'online':'offline'}`;
-                    document.getElementById(`text-${svc}`).textContent = status;
-                });
-            } catch {}
-        }
-        
-        function openModal(id) { document.getElementById(id).classList.add('active'); }
-        function closeModal(id) { document.getElementById(id).classList.remove('active'); }
-        window.onclick = (e) => { if (e.target.classList.contains('modal')) e.target.classList.remove('active'); };
-    </script>
-</body>
-</html>
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>VPN Panel</title>
+<link rel="stylesheet" href="/static/style.css"></head><body>
+<header class="header"><div class="container header-content">
+<div class="logo">🚀 VPN Panel</div><div class="flex">
+<span id="username"></span><button class="btn btn-outline btn-sm" onclick="logout()">Выйти</button>
+</div></div></header><main class="container">
+<div id="alert" class="alert hidden"></div>
+<div class="card"><div class="card-header"><span class="card-title">📊 Статус</span>
+<button class="btn btn-outline btn-sm" onclick="refreshStatus()">Обновить</button></div>
+<div class="flex" style="gap:1.5rem"><div><span class="status-dot" id="status-hysteria"></span>Hysteria: <span id="text-hysteria">...</span></div>
+<div><span class="status-dot" id="status-caddy"></span>Caddy: <span id="text-caddy">...</span></div></div></div>
+<div class="card"><div class="card-header"><span class="card-title">👥 Пользователи</span>
+<button class="btn btn-sm" onclick="openModal('userModal')">+ Добавить</button></div>
+<table class="table"><thead><tr><th>ID</th><th>Имя</th><th>Hysteria</th><th>Naive</th><th>Действия</th></tr></thead>
+<tbody id="usersTable"></tbody></table></div></main>
+<div id="userModal" class="modal"><div class="modal-content">
+<div class="modal-header"><h3>Новый пользователь</h3>
+<button class="modal-close" onclick="closeModal('userModal')">&times;</button></div>
+<form id="userForm"><div class="form-group"><label>Имя</label>
+<input type="text" id="newUsername" class="form-control" required></div>
+<div class="form-group"><label>Пароль (опционально)</label>
+<input type="text" id="newPassword" class="form-control"></div>
+<button type="submit" class="btn">Создать</button></form></div></div>
+<div id="configModal" class="modal"><div class="modal-content">
+<div class="modal-header"><h3>Конфигурация</h3>
+<button class="modal-close" onclick="closeModal('configModal')">&times;</button></div>
+<div id="configHysteria" class="config-box"></div><div id="configNaive" class="config-box"></div>
+<div class="flex" style="margin-top:1rem"><button class="btn btn-sm btn-outline" onclick="copyConfig('hysteria')">Копировать Hysteria</button>
+<button class="btn btn-sm btn-outline" onclick="copyConfig('naive')">Копировать Naive</button></div></div></div>
+<script>
+const token=localStorage.getItem('token');if(!token)window.location.href='/login';
+const headers={'Authorization':`Bearer ${token}`};let currentUserId=null;
+(async ()=>{try{const res=await fetch('/api/auth/me',{headers});if(!res.ok)throw new Error();
+const data=await res.json();document.getElementById('username').textContent=data.username;
+loadUsers();refreshStatus();}catch{localStorage.removeItem('token');window.location.href='/login';}})();
+function logout(){localStorage.removeItem('token');window.location.href='/login';}
+function showAlert(msg,type='success'){const alert=document.getElementById('alert');
+alert.className=`alert alert-${type}`;alert.textContent=msg;alert.classList.remove('hidden');
+setTimeout(()=>alert.classList.add('hidden'),3000);}
+async function loadUsers(){try{const res=await fetch('/api/users',{headers});const users=await res.json();
+document.getElementById('usersTable').innerHTML=users.map(u=>`<tr><td>${u.id}</td><td>${u.username}</td>
+<td><small>${u.hysteria_uri.substring(0,30)}...</small></td><td><small>${u.naive_uri.substring(0,30)}...</small></td>
+<td><button class="btn btn-sm btn-outline" onclick="showConfig(${u.id})">🔑</button>
+<button class="btn btn-sm btn-danger" onclick="deleteUser(${u.id})">🗑️</button></td></tr>`).join('');}
+catch(err){showAlert(err.message,'error');}}
+document.getElementById('userForm').addEventListener('submit',async(e)=>{e.preventDefault();
+try{const res=await fetch('/api/users',{method:'POST',headers:{...headers,'Content-Type':'application/json'},
+body:JSON.stringify({username:document.getElementById('newUsername').value,password:document.getElementById('newPassword').value||undefined})});
+if(!res.ok)throw new Error('Ошибка');closeModal('userModal');e.target.reset();showAlert('Создан');loadUsers();}
+catch(err){showAlert(err.message,'error');}});
+async function deleteUser(id){if(!confirm('Удалить?'))return;
+try{await fetch(`/api/users/${id}`,{method:'DELETE',headers});showAlert('Удален');loadUsers();}
+catch(err){showAlert(err.message,'error');}}
+async function showConfig(id){currentUserId=id;
+try{const[h,n]=await Promise.all([fetch(`/api/config/generate/${id}?config_type=hysteria`,{headers}),
+fetch(`/api/config/generate/${id}?config_type=naive`,{headers})]);
+document.getElementById('configHysteria').textContent=await h.text();
+document.getElementById('configNaive').textContent=await n.text();openModal('configModal');}
+catch(err){showAlert(err.message,'error');}}
+function copyConfig(type){const text=document.getElementById(`config${type==='hysteria'?'Hysteria':'Naive'}`).textContent;
+navigator.clipboard.writeText(text).then(()=>showAlert('Скопировано'));}
+async function refreshStatus(){try{const res=await fetch('/api/system/status',{headers});const data=await res.json();
+['hysteria','caddy'].forEach(svc=>{const status=data.services[svc];
+document.getElementById(`status-${svc}`).className=`status-dot ${status==='active'?'online':'offline'}`;
+document.getElementById(`text-${svc}`).textContent=status;});}catch{}}
+function openModal(id){document.getElementById(id).classList.add('active');}
+function closeModal(id){document.getElementById(id).classList.remove('active');}
+window.onclick=(e)=>{if(e.target.classList.contains('modal'))e.target.classList.remove('active');};
+</script></body></html>
 EOF
 
     log_success "Frontend создан"
@@ -910,7 +679,6 @@ EOF
 
     systemctl daemon-reload
     systemctl enable hysteria panel 2>/dev/null || true
-    
     log_success "Systemd настроен"
 }
 
@@ -958,7 +726,6 @@ save_config() {
 EOF
     chmod 600 "${DATA_DIR}/server_config.json"
     
-    # Обновление пароля админа
     python3 << PYEOF
 import sys
 sys.path.insert(0, '${BACKEND_DIR}')
@@ -993,7 +760,8 @@ print_final() {
     echo -e "${BLUE}NaiveProxy:${NC}"
     echo "  https://${NAIVE_USER}:${NAIVE_PASS}@${MASK_DOMAIN}:443\n"
     
-    echo -e "${YELLOW}Сохраните эти данные!${NC}\n"
+    echo -e "${YELLOW}СОХРАНИТЕ ЭТИ ДАННЫЕ!${NC}\n"
+    echo "Лог: /tmp/vpn-install.log"
 }
 
 main() {
@@ -1002,6 +770,7 @@ main() {
     check_root
     check_os
     collect_input
+    
     prepare_system
     enable_bbr
     install_caddy
@@ -1013,8 +782,9 @@ main() {
     configure_caddy
     save_config
     
-    # Запуск сервисов
-    systemctl start hysteria panel
+    log_info "Запуск сервисов..."
+    systemctl start hysteria || log_error "Failed to start hysteria"
+    systemctl start panel || log_error "Failed to start panel"
     
     print_final
 }
