@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hysteria2 Panel</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 Hysteria2 Panel</h1>
+            <div id="auth-section">
+                <input type="password" id="panel-pass" placeholder="Пароль панели">
+                <button onclick="login()">Войти</button>
+            </div>
+            <div id="user-section" style="display:none">
+                <span>👤 Авторизован</span>
+                <button onclick="logout()">Выйти</button>
+            </div>
+        </header>
+
+        <main id="app" style="display:none">
+            <form id="add-form">
+                <input type="text" id="name" placeholder="Имя пользователя *" required>
+                <input type="text" id="uuid" placeholder="UUID *" required>
+                <input type="date" id="expires" placeholder="Срок действия">
+                <input type="number" id="limit" placeholder="Лимит (ГБ, опционально)">
+                <button type="submit">➕ Добавить</button>
+            </form>
+
+            <table id="users-table">
+                <thead>
+                    <tr>
+                        <th>Имя</th>
+                        <th>UUID</th>
+                        <th>Срок</th>
+                        <th>Лимит</th>
+                        <th>Ссылка</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody id="users-body"></tbody>
+            </table>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
